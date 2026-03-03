@@ -12,9 +12,9 @@ namespace fs = std::filesystem;
 struct Test {
   std::string input;
   std::string expected_output;
-  bool passed;
+  std::string real_output;
+  bool passed = false;
 };
-
 std::string error(int status) {
   if (status == 0)
     return "Успешно :)";
@@ -63,7 +63,6 @@ std::string error(int status) {
     return "Error code " + std::to_string(status);
   }
 }
-
 std::string terminal(std::string command, std::string input = "") {
   char buffer[128];
   std::string result = "";
@@ -91,13 +90,22 @@ std::string terminal(std::string command, std::string input = "") {
   return result;
 }
 
-int main() {
-  std::string students_kod = "#include <iostream>\nint main() { int a, b; "
-                             "std::cin >> a >> b; std::cout << a + b; }";
-  std::vector<Test> tests = {{"2 3", "5", false},
-                             {"10 20", "30", false},
-                             {"-5 5", "0", false},
-                             {"100 200", "300", false}};
+struct Run_result {
+
+  bool pass_compile = false;
+  std::string compile_error;
+
+  int total_tests = 0;
+  int passed_tests = 0;
+  std::vector<Test> tests_results;
+  double execution_time = 0;
+  int exit_code = 0;
+};
+
+Run_result run_student_code(const std::string &code,
+                            const std::vector<Test> &tests) {
+  Run_result result;
+
   auto now = std::chrono::system_clock::now();
   auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 now.time_since_epoch())
@@ -113,23 +121,26 @@ int main() {
 
   std::ofstream file(filename);
   if (!file) {
-    std::cerr << "ERROR: Cannot create file" << std::endl;
-    return 1;
+    result.pass_compile = false;
+    result.compile_error = "ERROR: Cannot create file";
+    return result;
   }
-  file << students_kod;
+  file << code;
   file.close();
 
   if (!fs::exists(filename)) {
-    std::cerr << "ERROR: File was not created" << std::endl;
-    return 1;
+    result.pass_compile = false;
+    result.compile_error = "ERROR: File was not created";
+    return result;
   }
 
   if (fs::file_size(filename) == 0) {
-    std::cerr << "ERROR: File is empty" << std::endl;
-    return 1;
+    result.pass_compile = false;
+    result.compile_error = "ERROR: File is empty";
+    return result;
   }
 
-  std::string compine_command = "docker run --rm "
+  std::string compile_command = "docker run --rm "
                                 "--memory=256m "
                                 "--cpus=0.5 "
                                 "--stop-timeout=5 "
@@ -140,14 +151,17 @@ int main() {
                                 "silkeh/clang:latest clang++ " +
                                 filename + " -o solution 2>&1";
 
-  std::string compine_result = terminal(compine_command);
+  std::string compile_result = terminal(compile_command);
   std::string executable = "/tmp/solution";
+
   if (!fs::exists(executable)) {
-    std::cout << "COMPILATION ERROR:\n" << compine_result << std::endl;
+    result.pass_compile = false;
+    result.compile_error = compile_result;
     fs::remove(filename);
-    return 1;
+    return result;
   }
-  std::cout << "Running " << tests.size() << " tests...\n";
+  result.pass_compile = true; 
+  result.compile_error = "";
   std::string run_result = "docker run --rm "
                            "--memory=256m "
                            "--cpus=0.5 "
@@ -157,30 +171,72 @@ int main() {
                            "-v /tmp:/workspace "
                            "-w /workspace "
                            "silkeh/clang:latest ./solution";
-  int passed_tests = 0;
+
+  result.total_tests = tests.size();
+  result.passed_tests = 0;
+  std::vector<Test> test_results = tests;
+
   for (int i = 0; i < tests.size(); ++i) {
-    std::cout << "Test " << i + 1 << ": ";
+
     std::string output = terminal(run_result, tests[i].input);
+
+    test_results[i].real_output = output;
     if (output == tests[i].expected_output) {
-      tests[i].passed = true;
-      passed_tests++;
-      std::cout << "PASSED\n";
+      test_results[i].passed = true;
     } else {
-      tests[i].passed = false;
-      std::cout << "FAILED\n";
-      std::cout << "Expected: '" << tests[i].expected_output << "'\n";
-      std::cout << "Got:      '" << output << "'\n";
+      test_results[i].passed = false;
+    }
+
+    if (test_results[i].passed) {
+      result.passed_tests++;
     }
   }
-  std::cout << "\n=== RESULTS ===\n";
-  std::cout << "Passed: " << passed_tests << "/" << tests.size() << " tests\n";
 
-  if (passed_tests == tests.size()) {
+  result.tests_results = test_results;
+
+  fs::remove(executable);
+  fs::remove(filename);
+  return result;
+}
+
+int main() {
+  std::string students_kod = "#include <iostream>\nint main() { int a, b; "
+                             "std::cin >> a >> b; std::cout << a + b; }";
+  std::vector<Test> tests = {{"2 3", "5", "", false},
+                             {"10 20", "30", "", false},
+                             {"-5 5", "0", "", false},
+                             {"100 200", "300", "", false}};
+
+  Run_result result = run_student_code(students_kod, tests);
+
+  if (!result.pass_compile) {
+    std::cout << "COMPILATION ERROR:\n" << result.compile_error << std::endl;
+    return 1;
+  }
+
+  std::cout << "Running " << result.total_tests << " tests...\n";
+  for (int i = 0; i < result.tests_results.size(); ++i) {
+
+    std::cout << "Test " << i + 1 << ": ";
+
+    if (result.tests_results[i].passed) {
+      std::cout << "PASSED\n";
+    } else {
+      std::cout << "FAILED\n";
+      std::cout << "Expected: '" << result.tests_results[i].expected_output
+                << "'\n";
+      std::cout << "Got: '" << result.tests_results[i].real_output
+                << "'\n";
+    }
+  }
+
+  std::cout << "\n=== RESULTS ===\n";
+  std::cout << "Passed: " << result.passed_tests << "/" << result.total_tests
+            << " tests\n";
+
+  if (result.passed_tests == result.total_tests) {
     std::cout << "ALL TESTS PASSED!\n";
   } else {
     std::cout << "Some tests failed.\n";
   }
-
-  fs::remove(executable);
-  fs::remove(filename);
 }
